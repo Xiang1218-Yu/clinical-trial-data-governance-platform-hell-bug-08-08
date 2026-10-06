@@ -49,18 +49,17 @@ function appendAudit(event: AdverseEvent, action: EventAudit['action'], actor: s
 function appendTimeline(event: AdverseEvent, type: string, payload: Record<string, unknown>) {
   eventTimeline.unshift({ id: `timeline-${randomUUID().slice(0, 10)}`, eventId: event.id, version: event.version, type, payload: clone(payload), createdAt: now() });
 }
+function outboxDedupeKey(aggregateType: OutboxMessage['aggregateType'], aggregateId: string, eventType: string, version: number) {
+  return `${aggregateType}:${aggregateId}:${eventType}:${version}`;
+}
 function appendOutbox(aggregateId: string, aggregateType: OutboxMessage['aggregateType'], eventType: string, version: number, payload: Record<string, unknown>) {
-  const dedupeKey = `${aggregateType}:${aggregateId}`;
+  const dedupeKey = outboxDedupeKey(aggregateType, aggregateId, eventType, version);
+  // Only an exact replay (same aggregate + eventType + version) hits the idempotent record.
+  // Different state versions, event types and business phases must each remain consumable,
+  // so an existing message is returned untouched: its payload is frozen at write time and a
+  // newer version can never overwrite an older message.
   const existing = outboxMessages.find((message) => message.dedupeKey === dedupeKey);
-  if (existing) {
-    if (existing.version <= version) {
-      existing.payload = clone(payload);
-      existing.eventType = eventType;
-      existing.version = version;
-      existing.createdAt = now();
-    }
-    return existing;
-  }
+  if (existing) return existing;
   const message: OutboxMessage = {
     id: `outbox-${randomUUID().slice(0, 10)}`,
     aggregateId,
@@ -72,12 +71,17 @@ function appendOutbox(aggregateId: string, aggregateType: OutboxMessage['aggrega
     status: 'PENDING',
     createdAt: now(),
   };
+  // Append-only: insertion order is the emission order used as the same-version tiebreaker.
   outboxMessages.push(message);
-  outboxMessages.sort((left, right) => {
-    if (left.aggregateId !== right.aggregateId) return left.aggregateId.localeCompare(right.aggregateId);
-    return left.version - right.version;
-  });
   return message;
+}
+function compareOutboxMessages(left: OutboxMessage, right: OutboxMessage) {
+  if (left.aggregateType !== right.aggregateType) return left.aggregateType.localeCompare(right.aggregateType);
+  if (left.aggregateId !== right.aggregateId) return left.aggregateId.localeCompare(right.aggregateId);
+  // Within an aggregate, pending delivery follows the aggregate's version progression;
+  // phases sharing a version (QUEUED -> RUNNING -> COMPLETED) stay in emission order.
+  if (left.version !== right.version) return left.version - right.version;
+  return outboxMessages.indexOf(left) - outboxMessages.indexOf(right);
 }
 
 function scope<T extends { studyId: string }>(items: T[], studyId?: string) { return items.filter((item) => !studyId || item.studyId === studyId); }
@@ -238,7 +242,16 @@ export function snapshot(studyId?: string) {
 
 export function listAudits(eventId: string): EventAudit[] { return auditEntries.filter((item) => item.eventId === eventId).map(clone); }
 export function listTimeline(eventId: string) { return eventTimeline.filter((item) => item.eventId === eventId).map(clone); }
-export function listOutbox(studyId?: string) { const eventIds = new Set(scope(adverseEvents, studyId).map((item) => item.id)); return outboxMessages.filter((item) => !studyId || (item.aggregateType === 'ADVERSE_EVENT' ? eventIds.has(item.aggregateId) : exports.some((job) => job.id === item.aggregateId && job.studyId === studyId))).map(clone); }
+export function listOutbox(studyId?: string) {
+  let messages = outboxMessages;
+  if (studyId) {
+    const eventIds = new Set(adverseEvents.filter((item) => item.studyId === studyId).map((item) => item.id));
+    const exportIds = new Set(exports.filter((job) => job.studyId === studyId).map((job) => job.id));
+    const batchIds = new Set(dataBatches.filter((batch) => batch.studyId === studyId).map((batch) => batch.id));
+    messages = messages.filter((item) => (item.aggregateType === 'ADVERSE_EVENT' ? eventIds.has(item.aggregateId) : item.aggregateType === 'EXPORT_JOB' ? exportIds.has(item.aggregateId) : batchIds.has(item.aggregateId)));
+  }
+  return messages.slice().sort(compareOutboxMessages).map(clone);
+}
 export function listReviewTasks(studyId?: string): ReviewTask[] { return scope(reviewTasks, studyId).map(clone); }
 export function listQualityFindings(studyId?: string): QualityFinding[] { return scope(qualityFindings, studyId).map(clone); }
 export function listSignals(studyId?: string) { return signalDefinitions.filter((item) => item.enabled && (!studyId || item.studyId === studyId)).map((definition) => ({ definition: clone(definition), result: signalFor(definition.studyId, definition) })); }
