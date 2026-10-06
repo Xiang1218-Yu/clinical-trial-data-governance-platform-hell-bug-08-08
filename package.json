@@ -1,0 +1,11 @@
+{
+  "name": "clinical-trial-data-governance-platform",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": ["apps/api"],
+  "scripts": {
+    "dev": "npm run dev -w apps/api",
+    "build": "npm run build -w apps/api",
+    "typecheck": "npm run typecheck -w apps/api"
+  }
+}
