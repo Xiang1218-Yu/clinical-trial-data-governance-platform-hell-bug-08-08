@@ -50,17 +50,9 @@ function appendTimeline(event: AdverseEvent, type: string, payload: Record<strin
   eventTimeline.unshift({ id: `timeline-${randomUUID().slice(0, 10)}`, eventId: event.id, version: event.version, type, payload: clone(payload), createdAt: now() });
 }
 function appendOutbox(aggregateId: string, aggregateType: OutboxMessage['aggregateType'], eventType: string, version: number, payload: Record<string, unknown>) {
-  const dedupeKey = `${aggregateType}:${aggregateId}`;
+  const dedupeKey = `${aggregateType}:${aggregateId}:${eventType}:${version}`;
   const existing = outboxMessages.find((message) => message.dedupeKey === dedupeKey);
-  if (existing) {
-    if (existing.version <= version) {
-      existing.payload = clone(payload);
-      existing.eventType = eventType;
-      existing.version = version;
-      existing.createdAt = now();
-    }
-    return existing;
-  }
+  if (existing) return existing;
   const message: OutboxMessage = {
     id: `outbox-${randomUUID().slice(0, 10)}`,
     aggregateId,
@@ -74,8 +66,10 @@ function appendOutbox(aggregateId: string, aggregateType: OutboxMessage['aggrega
   };
   outboxMessages.push(message);
   outboxMessages.sort((left, right) => {
+    if (left.aggregateType !== right.aggregateType) return left.aggregateType.localeCompare(right.aggregateType);
     if (left.aggregateId !== right.aggregateId) return left.aggregateId.localeCompare(right.aggregateId);
-    return left.version - right.version;
+    if (left.version !== right.version) return left.version - right.version;
+    return left.createdAt.localeCompare(right.createdAt);
   });
   return message;
 }
@@ -238,7 +232,17 @@ export function snapshot(studyId?: string) {
 
 export function listAudits(eventId: string): EventAudit[] { return auditEntries.filter((item) => item.eventId === eventId).map(clone); }
 export function listTimeline(eventId: string) { return eventTimeline.filter((item) => item.eventId === eventId).map(clone); }
-export function listOutbox(studyId?: string) { const eventIds = new Set(scope(adverseEvents, studyId).map((item) => item.id)); return outboxMessages.filter((item) => !studyId || (item.aggregateType === 'ADVERSE_EVENT' ? eventIds.has(item.aggregateId) : exports.some((job) => job.id === item.aggregateId && job.studyId === studyId))).map(clone); }
+export function listOutbox(studyId?: string) {
+  const eventIds = new Set(scope(adverseEvents, studyId).map((item) => item.id));
+  const exportIds = new Set(scope(exports, studyId).map((item) => item.id));
+  const batchIds = new Set(scope(dataBatches, studyId).map((item) => item.id));
+  return outboxMessages.filter((item) => {
+    if (!studyId) return true;
+    if (item.aggregateType === 'ADVERSE_EVENT') return eventIds.has(item.aggregateId);
+    if (item.aggregateType === 'EXPORT_JOB') return exportIds.has(item.aggregateId);
+    return batchIds.has(item.aggregateId);
+  }).map(clone);
+}
 export function listReviewTasks(studyId?: string): ReviewTask[] { return scope(reviewTasks, studyId).map(clone); }
 export function listQualityFindings(studyId?: string): QualityFinding[] { return scope(qualityFindings, studyId).map(clone); }
 export function listSignals(studyId?: string) { return signalDefinitions.filter((item) => item.enabled && (!studyId || item.studyId === studyId)).map((definition) => ({ definition: clone(definition), result: signalFor(definition.studyId, definition) })); }
